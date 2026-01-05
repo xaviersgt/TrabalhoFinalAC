@@ -82,78 +82,188 @@
 #define MEMORY_SIZE 8192
 #define NUM_REGS 16
 
-//struct to cpu
+#define SP 14
+#define PC 15
 
 typedef struct {
-    uint16_t reg[NUM_REGS];       // R0 a R15
-    uint16_t memory[MEMORY_SIZE]; // Memória RAM (0x0000 - 0x2000)
-    uint16_t ir;                  // Instruction Register
-    int flag_z;                   // Flag Zero
-    int flag_c;                   // Flag Carry
-    bool mem_access[MEMORY_SIZE]; // Para rastrear posições acessadas p/ o print final
+    uint16_t reg[NUM_REGS];
+    uint16_t memory[MEMORY_SIZE];
+    bool mem_access[MEMORY_SIZE];
+    uint16_t ir;
+    int flag_z;
+    int flag_c;
 } CPU;
 
-//init cpu function
+/* ================= AUX ================= */
+
+int16_t sign_extend(uint16_t val, int bits) {
+    uint16_t mask = 1 << (bits - 1);
+    return (val ^ mask) - mask;
+}
+
+uint16_t zero_extend(uint16_t val) {
+    return val;
+}
+
+void mem_check(uint16_t addr) {
+    if (addr >= MEMORY_SIZE) {
+        printf("Erro: acesso invalido a memoria 0x%04X\n", addr);
+        exit(1);
+    }
+}
+
+/* ================= DUMP ================= */
+
+void dump_cpu(CPU *cpu) {
+    for (int i = 0; i < NUM_REGS; i++)
+        printf("R%d = 0x%04X\n", i, cpu->reg[i]);
+
+    printf("Z = %d\n", cpu->flag_z);
+    printf("C = %d\n", cpu->flag_c);
+}
+
+/* ================= INIT ================= */
 
 void cpu_init(CPU *cpu) {
-    for (int i = 0; i < NUM_REGS; i++) {
+    for (int i = 0; i < NUM_REGS; i++)
         cpu->reg[i] = 0;
-    }
+
     for (int i = 0; i < MEMORY_SIZE; i++) {
         cpu->memory[i] = 0;
         cpu->mem_access[i] = false;
     }
-    cpu->ir = 0;
-    cpu->flag_z = 0;
-    cpu->flag_c = 0;
-    cpu->reg[14] = 0x2000; // Initialize SP
-    cpu->reg[15] = 0;      // Initialize PC
+
+    cpu->flag_z = cpu->flag_c = 0;
+    cpu->reg[SP] = 0x2000;
+    cpu->reg[PC] = 0;
 }
 
-//Loader function
+/* ================= LOADER ================= */
 
-void load_program(CPU *cpu, const char *filename) {
-    FILE *f = fopen(filename, "r");
+void load_program(CPU *cpu, const char *file) {
+    FILE *f = fopen(file, "r");
     if (!f) {
-        perror("Failed to open file");
-        exit(EXIT_FAILURE);
+        perror("Erro ao abrir arquivo");
+        exit(1);
     }
 
-    uint16_t address, content;
-    while (fscanf(f, "%hx %hx", &address, &content) == 2) {
-        if (address < MEMORY_SIZE) {
-            cpu->memory[address] = content;
-        }
-    }
+    uint16_t addr, val;
+    while (fscanf(f, "%hx %hx", &addr, &val) == 2)
+        if (addr < MEMORY_SIZE)
+            cpu->memory[addr] = val;
 
     fclose(f);
 }
 
-//cicle FETCH ONLY SEARCH INSTRUCTION
+/* ================= EXEC ================= */
+
 void cpu_run(CPU *cpu) {
     while (1) {
-        uint16_t pc = cpu->reg[15];
+        uint16_t old_pc = cpu->reg[PC];
+        mem_check(old_pc);
 
-        cpu->ir = cpu->memory[pc];
-        cpu->mem_access[pc] = true;
+        cpu->ir = cpu->memory[old_pc];
+        cpu->reg[PC]++;
 
-        cpu->reg[15]++; // PC incrementa antes da execucao
+        if (cpu->ir == 0xFFFF) {
+            dump_cpu(cpu);
+            return;
+        }
 
-        uint16_t opcode = cpu->ir & 0x000F;
+        uint16_t opcode = cpu->ir & 0xF;
+        uint16_t rd = (cpu->ir >> 12) & 0xF;
+        uint16_t rm = (cpu->ir >> 8) & 0xF;
+        uint16_t rn = (cpu->ir >> 4) & 0xF;
+
+        uint16_t imm4  = cpu->ir >> 4 & 0xF;
+        int16_t imm8   = sign_extend((cpu->ir >> 4) & 0xFF, 8);
+        int16_t imm12  = sign_extend(cpu->ir >> 4, 12);
 
         switch (opcode) {
-            case 0x0: // HALT (exemplo)
-                printf("HALT encontrado\n");
-                return;
 
-            default:
-                printf("Opcode nao implementado: 0x%X\n", opcode);
-                return;
+        case 0x4: // MOV
+            cpu->reg[rd] = imm8;
+            cpu->flag_z = (cpu->reg[rd] == 0);
+            break;
+
+        case 0x5: { // ADD
+            uint32_t r = cpu->reg[rm] + cpu->reg[rn];
+            cpu->reg[rd] = r;
+            cpu->flag_z = (cpu->reg[rd] == 0);
+            cpu->flag_c = (r > 0xFFFF);
+            break;
+        }
+
+        case 0x6: { // ADDI
+            uint32_t r = cpu->reg[rm] + imm4;
+            cpu->reg[rd] = r;
+            cpu->flag_z = (cpu->reg[rd] == 0);
+            cpu->flag_c = (r > 0xFFFF);
+            break;
+        }
+
+        case 0x7: { // SUB
+            cpu->flag_c = (cpu->reg[rm] < cpu->reg[rn]);
+            cpu->reg[rd] = cpu->reg[rm] - cpu->reg[rn];
+            cpu->flag_z = (cpu->reg[rd] == 0);
+            break;
+        }
+
+        case 0x8: { // SUBI
+            cpu->flag_c = (cpu->reg[rm] < imm4);
+            cpu->reg[rd] = cpu->reg[rm] - imm4;
+            cpu->flag_z = (cpu->reg[rd] == 0);
+            break;
+        }
+
+        case 0x9: // OR
+            cpu->reg[rd] = cpu->reg[rm] | cpu->reg[rn];
+            cpu->flag_z = (cpu->reg[rd] == 0);
+            break;
+
+        case 0xA: // MUL
+            cpu->reg[rd] = cpu->reg[rm] * cpu->reg[rn];
+            cpu->flag_z = (cpu->reg[rd] == 0);
+            cpu->flag_c = 0;
+            break;
+
+        case 0xB: // AND
+            cpu->reg[rd] = cpu->reg[rm] & cpu->reg[rn];
+            cpu->flag_z = (cpu->reg[rd] == 0);
+            break;
+
+        case 0xC: // SHL
+            cpu->reg[rd] = cpu->reg[rm] << imm4;
+            cpu->flag_z = (cpu->reg[rd] == 0);
+            break;
+
+        case 0xD: { // CMP
+            cpu->flag_z = (cpu->reg[rm] == cpu->reg[rn]);
+            cpu->flag_c = (cpu->reg[rm] < cpu->reg[rn]);
+            break;
+        }
+
+        case 0x0: // JMP
+            cpu->reg[PC] = old_pc + imm12;
+            break;
+
+        case 0x1: { // JCOND
+            uint16_t cond = (cpu->ir >> 14) & 0x3;
+            if ((cond == 0 && cpu->flag_z) ||
+                (cond == 1 && !cpu->flag_z) ||
+                (cond == 2 && !cpu->flag_z && cpu->flag_c) ||
+                (cond == 3 && (cpu->flag_z || !cpu->flag_c)))
+                cpu->reg[PC] = old_pc + imm12;
+            break;
+        }
+
+        default:
+            printf("Instrucao invalida: 0x%04X\n", cpu->ir);
+            dump_cpu(cpu);
+            return;
         }
     }
 }
-
-//main function
 
 int main(int argc, char *argv[]) {
     if (argc < 2) {
@@ -165,6 +275,5 @@ int main(int argc, char *argv[]) {
     cpu_init(&cpu);
     load_program(&cpu, argv[1]);
     cpu_run(&cpu);
-
     return 0;
 }

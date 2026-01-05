@@ -1,0 +1,17 @@
+{
+  "configurations": [
+    {
+      "name": "UCRT64",
+      "compilerPath": "C:/msys64/ucrt64/bin/gcc.exe",
+      "intelliSenseMode": "windows-gcc-x64",
+      "cStandard": "c17",
+      "includePath": [
+        "${default}",
+        "C:/msys64/ucrt64/include",
+        "C:/msys64/ucrt64/lib/gcc/x86_64-w64-mingw32/*/include",
+        "C:/msys64/ucrt64/lib/gcc/x86_64-w64-mingw32/*/include-fixed"
+      ]
+    }
+  ],
+  "version": 4
+}
