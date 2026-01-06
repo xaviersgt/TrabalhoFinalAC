@@ -81,14 +81,12 @@
 
 #define MEMORY_SIZE 8192
 #define NUM_REGS 16
-
 #define SP 14
 #define PC 15
 
 typedef struct {
     uint16_t reg[NUM_REGS];
     uint16_t memory[MEMORY_SIZE];
-    bool mem_access[MEMORY_SIZE];
     uint16_t ir;
     int flag_z;
     int flag_c;
@@ -99,10 +97,6 @@ typedef struct {
 int16_t sign_extend(uint16_t val, int bits) {
     uint16_t mask = 1 << (bits - 1);
     return (val ^ mask) - mask;
-}
-
-uint16_t zero_extend(uint16_t val) {
-    return val;
 }
 
 void mem_check(uint16_t addr) {
@@ -128,12 +122,11 @@ void cpu_init(CPU *cpu) {
     for (int i = 0; i < NUM_REGS; i++)
         cpu->reg[i] = 0;
 
-    for (int i = 0; i < MEMORY_SIZE; i++) {
+    for (int i = 0; i < MEMORY_SIZE; i++)
         cpu->memory[i] = 0;
-        cpu->mem_access[i] = false;
-    }
 
-    cpu->flag_z = cpu->flag_c = 0;
+    cpu->flag_z = 0;
+    cpu->flag_c = 0;
     cpu->reg[SP] = 0x2000;
     cpu->reg[PC] = 0;
 }
@@ -159,10 +152,8 @@ void load_program(CPU *cpu, const char *file) {
 
 void cpu_run(CPU *cpu) {
     while (1) {
-        uint16_t old_pc = cpu->reg[PC];
-        mem_check(old_pc);
-
-        cpu->ir = cpu->memory[old_pc];
+        mem_check(cpu->reg[PC]);
+        cpu->ir = cpu->memory[cpu->reg[PC]];
         cpu->reg[PC]++;
 
         if (cpu->ir == 0xFFFF) {
@@ -175,20 +166,19 @@ void cpu_run(CPU *cpu) {
         uint16_t rm = (cpu->ir >> 8) & 0xF;
         uint16_t rn = (cpu->ir >> 4) & 0xF;
 
-        uint16_t imm4  = cpu->ir >> 4 & 0xF;
+        uint16_t imm4  = (cpu->ir >> 4) & 0xF;        // ZERO extend
         int16_t imm8   = sign_extend((cpu->ir >> 4) & 0xFF, 8);
         int16_t imm12  = sign_extend(cpu->ir >> 4, 12);
 
         switch (opcode) {
 
-        case 0x4: // MOV
+        case 0x4: // MOV (NÃO altera flags)
             cpu->reg[rd] = imm8;
-            cpu->flag_z = (cpu->reg[rd] == 0);
             break;
 
         case 0x5: { // ADD
             uint32_t r = cpu->reg[rm] + cpu->reg[rn];
-            cpu->reg[rd] = r;
+            cpu->reg[rd] = r & 0xFFFF;
             cpu->flag_z = (cpu->reg[rd] == 0);
             cpu->flag_c = (r > 0xFFFF);
             break;
@@ -196,7 +186,7 @@ void cpu_run(CPU *cpu) {
 
         case 0x6: { // ADDI
             uint32_t r = cpu->reg[rm] + imm4;
-            cpu->reg[rd] = r;
+            cpu->reg[rd] = r & 0xFFFF;
             cpu->flag_z = (cpu->reg[rd] == 0);
             cpu->flag_c = (r > 0xFFFF);
             break;
@@ -216,35 +206,35 @@ void cpu_run(CPU *cpu) {
             break;
         }
 
-        case 0x9: // OR
+        case 0x9: // AND
+            cpu->reg[rd] = cpu->reg[rm] & cpu->reg[rn];
+            cpu->flag_z = (cpu->reg[rd] == 0);
+            break;
+
+        case 0xA: // OR
             cpu->reg[rd] = cpu->reg[rm] | cpu->reg[rn];
             cpu->flag_z = (cpu->reg[rd] == 0);
             break;
 
-        case 0xA: // MUL
-            cpu->reg[rd] = cpu->reg[rm] * cpu->reg[rn];
+        case 0xB: // SHR
+            cpu->reg[rd] = cpu->reg[rm] >> imm4;
             cpu->flag_z = (cpu->reg[rd] == 0);
             cpu->flag_c = 0;
-            break;
-
-        case 0xB: // AND
-            cpu->reg[rd] = cpu->reg[rm] & cpu->reg[rn];
-            cpu->flag_z = (cpu->reg[rd] == 0);
             break;
 
         case 0xC: // SHL
             cpu->reg[rd] = cpu->reg[rm] << imm4;
             cpu->flag_z = (cpu->reg[rd] == 0);
+            cpu->flag_c = 0;
             break;
 
-        case 0xD: { // CMP
+        case 0xD: // CMP
             cpu->flag_z = (cpu->reg[rm] == cpu->reg[rn]);
             cpu->flag_c = (cpu->reg[rm] < cpu->reg[rn]);
             break;
-        }
 
         case 0x0: // JMP
-            cpu->reg[PC] = old_pc + imm12;
+            cpu->reg[PC] += imm12;
             break;
 
         case 0x1: { // JCOND
@@ -253,7 +243,7 @@ void cpu_run(CPU *cpu) {
                 (cond == 1 && !cpu->flag_z) ||
                 (cond == 2 && !cpu->flag_z && cpu->flag_c) ||
                 (cond == 3 && (cpu->flag_z || !cpu->flag_c)))
-                cpu->reg[PC] = old_pc + imm12;
+                cpu->reg[PC] += imm12;
             break;
         }
 
