@@ -130,7 +130,7 @@ void cpu_init(CPU *cpu) {
 
     cpu->flag_z = 0;
     cpu->flag_c = 0;
-    cpu->reg[SP] = 0x2000;
+    cpu->reg[SP] = MEMORY_SIZE;
     cpu->reg[PC] = 0;
 }
 
@@ -171,7 +171,7 @@ void cpu_run(CPU *cpu) {
 
         uint16_t imm4  = (cpu->ir >> 4) & 0xF;        // ZERO extend
         int16_t imm8   = sign_extend((cpu->ir >> 4) & 0xFF, 8);
-        int16_t imm12  = sign_extend(cpu->ir >> 4, 12);
+        int16_t imm12  = sign_extend((cpu->ir >> 4) & 0x0FFF, 12);
 
         switch (opcode) {
 
@@ -273,31 +273,58 @@ void cpu_run(CPU *cpu) {
         /* ================= PILHA ================= */
 
         case 0xE: // PUSH
-            cpu->reg[SP]--;
-            mem_check(cpu->reg[SP]);
+            cpu->reg[SP]--;                 // primeiro decrementa
+            mem_check(cpu->reg[SP]);        // agora é válido
             cpu->memory[cpu->reg[SP]] = cpu->reg[rn];
             cpu->mem_access[cpu->reg[SP]] = true;
             break;
 
         case 0xF: // POP
-            mem_check(cpu->reg[SP]);
+            mem_check(cpu->reg[SP]);        // SP aponta para dado válido
             cpu->reg[rd] = cpu->memory[cpu->reg[SP]];
-            cpu->reg[SP]++;
+            cpu->reg[SP]++;                 // depois incrementa
             break;
 
         /* ================= CONTROLE ================= */
 
-        case 0x0: // JMP
-            cpu->reg[PC] += imm12;
+        case 0x0: { // JMP
+            int32_t new_pc = (int32_t)cpu->reg[PC] + imm12;
+
+            if (new_pc < 0 || new_pc >= MEMORY_SIZE) {
+                printf("Erro: salto invalido JMP\n");
+                dump_cpu(cpu);
+                exit(1);
+            }
+
+            cpu->reg[PC] = (uint16_t)new_pc;
             break;
+        }
+
 
         case 0x1: { // JCOND
             uint16_t cond = (cpu->ir >> 14) & 0x3;
-            if ((cond == 0 && cpu->flag_z) ||
-                (cond == 1 && !cpu->flag_z) ||
-                (cond == 2 && !cpu->flag_z && cpu->flag_c) ||
-                (cond == 3 && (cpu->flag_z || !cpu->flag_c)))
-                cpu->reg[PC] += imm12;
+            int16_t imm10 = sign_extend((cpu->ir >> 4) & 0x03FF, 10);
+
+            bool jump = false;
+
+            switch (cond) {
+                case 0: jump = cpu->flag_z; break;                 // JEQ
+                case 1: jump = !cpu->flag_z; break;                // JNE
+                case 2: jump = cpu->flag_c; break;                 // JLT
+                case 3: jump = !cpu->flag_c || cpu->flag_z; break; // JGE
+            }
+
+            if (jump) {
+                int32_t new_pc = (int32_t)cpu->reg[PC] + imm10;
+
+                if (new_pc < 0 || new_pc >= MEMORY_SIZE) {
+                    printf("Erro: salto invalido JCOND\n");
+                    dump_cpu(cpu);
+                    exit(1);
+                }
+
+                cpu->reg[PC] = (uint16_t)new_pc;
+            }
             break;
         }
 
