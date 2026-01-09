@@ -1,350 +1,309 @@
-/*
- * =================================================================================
- * TRABALHO FINAL - ARQUITETURA DE COMPUTADORES (SIMULADOR RISC 16-BIT)
- * =================================================================================
- *
- * ESPECIFICAÇÕES GERAIS:
- * 1. Palavra de dados/instrução: 16 bits.
- * 2. Memória: 16KB (endereços 0x0000 a 0x2000). Mapeada como array de 8192 posições.
- * 3. Registradores: 16 (R0-R15).
- * - R14 = SP (Stack Pointer) -> Inicia em 0x2000.
- * - R15 = PC (Program Counter).
- * 4. Flags: Zero (Z) e Carry (C). Apenas instruções da ULA modificam as flags.
- *
- * =================================================================================
- * TODO LIST (O QUE PRECISA SER FEITO):
- * =================================================================================
- *
- * [ ] 1. ESTRUTURAS DE DADOS (STRUCTS)
- * - Criar struct 'CPU' contendo:
- * - uint16_t reg[16];        // R0 a R15
- * - uint16_t memory[8192];   // Memória RAM (0x0000 - 0x2000)
- * - uint16_t ir;             // Instruction Register
- * - int flag_z;              // Flag Zero
- * - int flag_c;              // Flag Carry
- * - bool mem_access[8192];   // (Dica PDF) Para rastrear posições acessadas p/ o print final.
- *
- * [ ] 2. LEITURA DO ARQUIVO (LOADER)
- * - Abrir arquivo .txt ou .hex passado por argumento.
- * - Ler linhas no formato "<endereço> <conteúdo>" (hexadecimal).
- * - Preencher o array 'memory' da CPU com esses valores.
- * - Armazenar breakpoints (se houver, passados via argv).
- *
- * [ ] 3. CICLO DE EXECUÇÃO (Loop Principal)
- * - Loop while(1) até encontrar instrução HALT.
- * - 3.1. BUSCA (FETCH):
- * IR = memory[PC]
- * old_pc = PC;  // Guardar p/ debug/breakpoints
- * PC = PC + 1;  // IMPORTANTE: PC incrementa ANTES de executar [PDF Pag 5]
- *
- * - 3.2. DECODIFICAÇÃO (DECODE):
- * Extrair Opcode (bits 0-3).
- * Extrair Operandos (Rd, Rm, Rn, Imediato) dependendo do tipo da instrução.
- * Dica: Fazer extensão de sinal para imediatos em JMP, J<cond> e MOV [PDF Pag 5].
- *
- * - 3.3. EXECUÇÃO (EXECUTE) - SWITCH CASE NO OPCODE:
- * - JUMP (JMP, JEQ, JNE, JLT, JGE): Verificar flags Z/C e somar PC + Imediato.
- * - MEMÓRIA (LDR, STR):
- * * Atenção: STR salva na memória, LDR carrega p/ registrador.
- * * IMPORTANTE: Verificar Mapeamento de E/S (Endereços >= 0xF000).
- * - 0xF000/0xF001: Char I/O (getchar/putchar).
- * - 0xF002/0xF003: Int I/O (scanf/printf).
- * - MOVIMENTAÇÃO (MOV): Rd = Imediato.
- * - ULA (ADD, SUB, AND, OR, SHL, SHR, CMP):
- * * Realizar operação.
- * * ATUALIZAR FLAGS Z e C (apenas aqui!).
- * * CMP é um SUB que não salva resultado, só flags.
- * - PILHA (PUSH, POP):
- * * PUSH: SP--, Mem[SP] = Rn.
- * * POP: Rd = Mem[SP], SP++.
- * - CONTROLE (HALT): Break no loop.
- *
- * [ ] 4. SISTEMA DE SAÍDA (DUMP)
- * - Criar função para imprimir o estado da máquina (chamada no HALT ou Breakpoint).
- * - Imprimir R0-R15 em Hexa.
- * - Imprimir Flags Z e C.
- * - Imprimir conteúdo da Memória de Dados (apenas posições marcadas como acessadas).
- * - Imprimir Pilha (se SP != 0x2000, imprimir de SP até o fundo).
- *
- * [ ] 5. IMPLEMENTAR FUNÇÕES AUXILIARES (Dicas do PDF)
- * - Extensão de sinal (converter 6 bits ou 8 bits para 16 bits signed).
- * - Verificação de breakpoints.
- *
- * =================================================================================
- */
-
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <string.h>
 
-#define MEMORY_SIZE 8192
+#define TAMANHO_MEMORIA 8192
 #define NUM_REGS 16
 #define SP 14
 #define PC 15
 
+#define IO_CHAR_ENTRADA 0xF000
+#define IO_CHAR_SAIDA   0xF001
+#define IO_INT_ENTRADA  0xF002
+#define IO_INT_SAIDA    0xF003
+
 typedef struct {
-    uint16_t reg[NUM_REGS];
-    uint16_t memory[MEMORY_SIZE];
-    bool mem_access[MEMORY_SIZE];
+    uint16_t regs[NUM_REGS];
+    uint16_t memoria[TAMANHO_MEMORIA];
+    bool mem_acessada[TAMANHO_MEMORIA];
     uint16_t ir;
     int flag_z;
     int flag_c;
 } CPU;
 
-/* ================= AUX ================= */
-
-int16_t sign_extend(uint16_t val, int bits) {
+int16_t extensao_sinal(uint16_t val, int bits) {
     uint16_t mask = 1 << (bits - 1);
     return (val ^ mask) - mask;
 }
 
-void mem_check(uint16_t addr) {
-    if (addr >= MEMORY_SIZE) {
-        printf("Erro: acesso invalido a memoria 0x%04X\n", addr);
+void verificar_memoria(uint16_t end) {
+    if (end >= TAMANHO_MEMORIA) {
+        printf("Erro: Acesso invalido a memoria fisica 0x%04hX\n", (unsigned short)end);
         exit(1);
     }
 }
 
-/* ================= DUMP ================= */
-
-void dump_cpu(CPU *cpu) {
-    for (int i = 0; i < NUM_REGS; i++)
-        printf("R%d = 0x%04X\n", i, cpu->reg[i]);
+void imprimir_estado_cpu(CPU *cpu) {
+    for (int i = 0; i < NUM_REGS; i++) {
+        printf("R%d = 0x%04hX\n", i, (unsigned short)cpu->regs[i]);
+    }
 
     printf("Z = %d\n", cpu->flag_z);
     printf("C = %d\n", cpu->flag_c);
+
+    for (int i = 0; i < TAMANHO_MEMORIA; i++) {
+        bool eh_pilha = (cpu->regs[SP] != 0x2000) &&
+                        (i >= cpu->regs[SP]) &&
+                        (i <= 0x1FFF);
+
+        if (cpu->mem_acessada[i] && !eh_pilha) {
+            printf("[ 0x%04hX ] = 0x%04hX\n",
+                   (unsigned short)i,
+                   (unsigned short)cpu->memoria[i]);
+        }
+    }
+
+    if (cpu->regs[SP] != 0x2000) {
+        int sp = cpu->regs[SP];
+        if (sp < TAMANHO_MEMORIA) {
+            for (int i = 0x1FFF; i >= sp; i--) {
+                printf("[ 0x%04hX ] = 0x%04hX\n",
+                       (unsigned short)i,
+                       (unsigned short)cpu->memoria[i]);
+            }
+        }
+    }
 }
 
-/* ================= INIT ================= */
 
-void cpu_init(CPU *cpu) {
-    for (int i = 0; i < NUM_REGS; i++)
-        cpu->reg[i] = 0;
 
-    for (int i = 0; i < MEMORY_SIZE; i++)
-        cpu->memory[i] = 0;
-    for (int i = 0; i < MEMORY_SIZE; i++)
-        cpu->mem_access[i] = false;
+void cpu_inicializar(CPU *cpu) {
+    memset(cpu->regs, 0, sizeof(cpu->regs));
+    memset(cpu->memoria, 0, sizeof(cpu->memoria));
+    memset(cpu->mem_acessada, 0, sizeof(cpu->mem_acessada));
 
     cpu->flag_z = 0;
     cpu->flag_c = 0;
-    cpu->reg[SP] = MEMORY_SIZE;
-    cpu->reg[PC] = 0;
+    cpu->regs[SP] = 0x2000;
+    cpu->regs[PC] = 0;
 }
 
-/* ================= LOADER ================= */
 
-void load_program(CPU *cpu, const char *file) {
-    FILE *f = fopen(file, "r");
+
+void carregar_programa(CPU *cpu, const char *arquivo) {
+    FILE *f = fopen(arquivo, "r");
     if (!f) {
         perror("Erro ao abrir arquivo");
         exit(1);
     }
 
-    uint16_t addr, val;
-    while (fscanf(f, "%hx %hx", &addr, &val) == 2)
-        if (addr < MEMORY_SIZE)
-            cpu->memory[addr] = val;
-
+    uint16_t end, val;
+    while (fscanf(f, "%hx %hx", &end, &val) == 2) {
+        if (end < TAMANHO_MEMORIA)
+            cpu->memoria[end] = val;
+    }
     fclose(f);
 }
 
-/* ================= EXEC ================= */
-
-void cpu_run(CPU *cpu) {
+void cpu_executar(CPU *cpu, int num_bps, int *breakpoints) {
     while (1) {
-        mem_check(cpu->reg[PC]);
-        cpu->ir = cpu->memory[cpu->reg[PC]];
-        cpu->reg[PC]++;
-
-        if (cpu->ir == 0xFFFF) {
-            dump_cpu(cpu);
-            return;
+        for (int i = 0; i < num_bps; i++) {
+            if (cpu->regs[PC] == breakpoints[i]) {
+                imprimir_estado_cpu(cpu);
+                getchar();
+            }
         }
+
+        if (cpu->regs[PC] >= TAMANHO_MEMORIA) {
+            break;
+        }
+
+        cpu->ir = cpu->memoria[cpu->regs[PC]];
+        uint16_t pc_atual = cpu->regs[PC];
+        cpu->regs[PC]++;
 
         uint16_t opcode = cpu->ir & 0xF;
-        uint16_t rd = (cpu->ir >> 12) & 0xF;
-        uint16_t rm = (cpu->ir >> 8) & 0xF;
-        uint16_t rn = (cpu->ir >> 4) & 0xF;
+        uint16_t rd     = (cpu->ir >> 12) & 0xF;
+        uint16_t rm     = (cpu->ir >> 8) & 0xF;
+        uint16_t rn     = (cpu->ir >> 4) & 0xF;
 
-        uint16_t imm4  = (cpu->ir >> 4) & 0xF;        // ZERO extend
-        int16_t imm8   = sign_extend((cpu->ir >> 4) & 0xFF, 8);
-        int16_t imm12  = sign_extend((cpu->ir >> 4) & 0x0FFF, 12);
+        uint16_t imm4_baixo = (cpu->ir >> 4) & 0xF;
+        uint16_t imm4_alto  = (cpu->ir >> 12) & 0xF;
+        int16_t  imm8       = extensao_sinal((cpu->ir >> 4) & 0xFF, 8);
+        int16_t  imm12      = extensao_sinal((cpu->ir >> 4) & 0x0FFF, 12);
 
         switch (opcode) {
+            case 0x0:
+                cpu->regs[PC] = cpu->regs[PC] + imm12;
+                break;
+            case 0x1:
+            {
+                uint16_t cond = (cpu->ir >> 14) & 0x3;
+                int16_t imm10 = extensao_sinal((cpu->ir >> 4) & 0x03FF, 10);
+                bool saltar = false;
 
-        case 0x4: // MOV (NÃO altera flags)
-            cpu->reg[rd] = imm8;
-            break;
-
-        case 0x5: { // ADD
-            uint32_t r = cpu->reg[rm] + cpu->reg[rn];
-            cpu->reg[rd] = r & 0xFFFF;
-            cpu->flag_z = (cpu->reg[rd] == 0);
-            cpu->flag_c = (r > 0xFFFF);
-            break;
-        }
-
-        case 0x6: { // ADDI
-            uint32_t r = cpu->reg[rm] + imm4;
-            cpu->reg[rd] = r & 0xFFFF;
-            cpu->flag_z = (cpu->reg[rd] == 0);
-            cpu->flag_c = (r > 0xFFFF);
-            break;
-        }
-
-        case 0x7: { // SUB
-            cpu->flag_c = (cpu->reg[rm] < cpu->reg[rn]);
-            cpu->reg[rd] = cpu->reg[rm] - cpu->reg[rn];
-            cpu->flag_z = (cpu->reg[rd] == 0);
-            break;
-        }
-
-        case 0x8: { // SUBI
-            cpu->flag_c = (cpu->reg[rm] < imm4);
-            cpu->reg[rd] = cpu->reg[rm] - imm4;
-            cpu->flag_z = (cpu->reg[rd] == 0);
-            break;
-        }
-
-        case 0x9: // AND
-            cpu->reg[rd] = cpu->reg[rm] & cpu->reg[rn];
-            cpu->flag_z = (cpu->reg[rd] == 0);
-            break;
-
-        case 0xA: // OR
-            cpu->reg[rd] = cpu->reg[rm] | cpu->reg[rn];
-            cpu->flag_z = (cpu->reg[rd] == 0);
-            break;
-
-        case 0xB: // SHR
-            cpu->reg[rd] = cpu->reg[rm] >> imm4;
-            cpu->flag_z = (cpu->reg[rd] == 0);
-            cpu->flag_c = 0;
-            break;
-
-        case 0xC: // SHL
-            cpu->reg[rd] = cpu->reg[rm] << imm4;
-            cpu->flag_z = (cpu->reg[rd] == 0);
-            cpu->flag_c = 0;
-            break;
-
-        case 0xD: // CMP
-            cpu->flag_z = (cpu->reg[rm] == cpu->reg[rn]);
-            cpu->flag_c = (cpu->reg[rm] < cpu->reg[rn]);
-            break;
-
-        /* ================= MEMÓRIA ================= */
-
-        case 0x2: { // LDR
-            uint16_t addr = cpu->reg[rm] + imm4;
-
-            if (addr >= 0xF000) {
-                if (addr == 0xF000)
-                    cpu->reg[rd] = getchar();
-                else if (addr == 0xF002)
-                    scanf("%hd", &cpu->reg[rd]);
-            } else {
-                mem_check(addr);
-                cpu->mem_access[addr] = true;
-                cpu->reg[rd] = cpu->memory[addr];
-            }
-            break;
-        }
-
-        case 0x3: { // STR
-            uint16_t addr = cpu->reg[rm] + imm4;
-
-            if (addr >= 0xF000) {
-                if (addr == 0xF001)
-                    putchar(cpu->reg[rn]);
-                else if (addr == 0xF003)
-                    printf("%d", cpu->reg[rn]);
-            } else {
-                mem_check(addr);
-                cpu->mem_access[addr] = true;
-                cpu->memory[addr] = cpu->reg[rn];
-            }
-            break;
-        }
-
-        /* ================= PILHA ================= */
-
-        case 0xE: // PUSH
-            cpu->reg[SP]--;                 // primeiro decrementa
-            mem_check(cpu->reg[SP]);        // agora é válido
-            cpu->memory[cpu->reg[SP]] = cpu->reg[rn];
-            cpu->mem_access[cpu->reg[SP]] = true;
-            break;
-
-        case 0xF: // POP
-            mem_check(cpu->reg[SP]);        // SP aponta para dado válido
-            cpu->reg[rd] = cpu->memory[cpu->reg[SP]];
-            cpu->reg[SP]++;                 // depois incrementa
-            break;
-
-        /* ================= CONTROLE ================= */
-
-        case 0x0: { // JMP
-            int32_t new_pc = (int32_t)cpu->reg[PC] + imm12;
-
-            if (new_pc < 0 || new_pc >= MEMORY_SIZE) {
-                printf("Erro: salto invalido JMP\n");
-                dump_cpu(cpu);
-                exit(1);
-            }
-
-            cpu->reg[PC] = (uint16_t)new_pc;
-            break;
-        }
-
-
-        case 0x1: { // JCOND
-            uint16_t cond = (cpu->ir >> 14) & 0x3;
-            int16_t imm10 = sign_extend((cpu->ir >> 4) & 0x03FF, 10);
-
-            bool jump = false;
-
-            switch (cond) {
-                case 0: jump = cpu->flag_z; break;                 // JEQ
-                case 1: jump = !cpu->flag_z; break;                // JNE
-                case 2: jump = cpu->flag_c; break;                 // JLT
-                case 3: jump = !cpu->flag_c || cpu->flag_z; break; // JGE
-            }
-
-            if (jump) {
-                int32_t new_pc = (int32_t)cpu->reg[PC] + imm10;
-
-                if (new_pc < 0 || new_pc >= MEMORY_SIZE) {
-                    printf("Erro: salto invalido JCOND\n");
-                    dump_cpu(cpu);
-                    exit(1);
+                switch (cond) {
+                    case 0: saltar = (cpu->flag_z == 1); break;
+                    case 1: saltar = (cpu->flag_z == 0); break;
+                    case 2: saltar = (cpu->flag_z == 0 && cpu->flag_c == 1); break;
+                    case 3: saltar = (cpu->flag_z == 1 || cpu->flag_c == 0); break;
                 }
 
-                cpu->reg[PC] = (uint16_t)new_pc;
+                if (saltar) {
+                    cpu->regs[PC] = cpu->regs[PC] + imm10;
+                }
+                break;
             }
-            break;
-        }
 
-        default:
-            printf("Instrucao invalida: 0x%04X\n", cpu->ir);
-            dump_cpu(cpu);
-            return;
-}
-   }
+            case 0x4:
+                cpu->regs[rd] = imm8;
+                break;
+
+            case 0x5:
+            {
+                uint32_t res = (uint32_t)cpu->regs[rm] + (uint32_t)cpu->regs[rn];
+                cpu->regs[rd] = (uint16_t)res;
+                cpu->flag_z = (cpu->regs[rd] == 0);
+                cpu->flag_c = (res > 0xFFFF);
+                break;
+            }
+
+            case 0x6:
+            {
+                uint32_t res = (uint32_t)cpu->regs[rm] + imm4_baixo;
+                cpu->regs[rd] = (uint16_t)res;
+                cpu->flag_z = (cpu->regs[rd] == 0);
+                cpu->flag_c = (res > 0xFFFF);
+                break;
+            }
+
+            case 0x7:
+                cpu->flag_c = (cpu->regs[rm] < cpu->regs[rn]);
+                cpu->regs[rd] = cpu->regs[rm] - cpu->regs[rn];
+                cpu->flag_z = (cpu->regs[rd] == 0);
+                break;
+
+            case 0x8:
+                cpu->flag_c = (cpu->regs[rm] < imm4_baixo);
+                cpu->regs[rd] = cpu->regs[rm] - imm4_baixo;
+                cpu->flag_z = (cpu->regs[rd] == 0);
+                break;
+
+            case 0x9:
+                cpu->regs[rd] = cpu->regs[rm] & cpu->regs[rn];
+                cpu->flag_z = (cpu->regs[rd] == 0);
+                break;
+
+            case 0xA:
+                cpu->regs[rd] = cpu->regs[rm] | cpu->regs[rn];
+                cpu->flag_z = (cpu->regs[rd] == 0);
+                break;
+
+            case 0xB:
+                cpu->regs[rd] = cpu->regs[rm] >> imm4_baixo;
+                cpu->flag_z = (cpu->regs[rd] == 0);
+                break;
+
+            case 0xC:
+                cpu->regs[rd] = cpu->regs[rm] << imm4_baixo;
+                cpu->flag_z = (cpu->regs[rd] == 0);
+                break;
+
+            case 0xD:
+                cpu->flag_z = (cpu->regs[rm] == cpu->regs[rn]);
+                cpu->flag_c = (cpu->regs[rm] < cpu->regs[rn]);
+                break;
+
+            case 0x2:
+            {
+                uint16_t end = cpu->regs[rm] + imm4_baixo;
+
+                if (end >= 0xF000) {
+                    if (end == IO_CHAR_ENTRADA) {
+                        int ch = getchar();
+                        cpu->regs[rd] = (uint16_t)(unsigned char)ch;
+                        printf("IN %c\n", (char)cpu->regs[rd]);
+                    }
+                    else if (end == IO_INT_ENTRADA) {
+                        short tmp;
+                        scanf("%hd", &tmp);
+                        cpu->regs[rd] = (uint16_t)tmp;
+                        printf("IN %hd\n", tmp);
+                    }
+                }
+                else {
+                    verificar_memoria(end);
+                    cpu->mem_acessada[end] = true;
+                    cpu->regs[rd] = cpu->memoria[end];
+                }
+                break;
+            }
+
+            case 0x3:
+            {
+                uint16_t end = cpu->regs[rm] + imm4_alto;
+                uint16_t dado = cpu->regs[rn];
+
+                if (end >= 0xF000) {
+                    if (end == IO_CHAR_SAIDA) {
+                        printf("OUT %c\n", (char)dado);
+                    }
+                    else if (end == IO_INT_SAIDA) {
+                        printf("OUT %hd\n", (short)dado);
+                    }
+                }
+                else {
+                    verificar_memoria(end);
+                    cpu->mem_acessada[end] = true;
+                    cpu->memoria[end] = dado;
+                }
+                break;
+            }
+
+            case 0xE:
+                cpu->regs[SP]--;
+                verificar_memoria(cpu->regs[SP]);
+                cpu->memoria[cpu->regs[SP]] = cpu->regs[rn];
+                break;
+
+            case 0xF:
+                if (cpu->ir == 0xFFFF) {
+                    imprimir_estado_cpu(cpu);
+                    return;
+                } else {
+                    verificar_memoria(cpu->regs[SP]);
+                    cpu->regs[rd] = cpu->memoria[cpu->regs[SP]];
+                    cpu->regs[SP]++;
+                }
+                break;
+
+            default:
+                printf("Instrucao desconhecida: 0x%04hX em PC=0x%04hX\n",
+                       (unsigned short)cpu->ir, (unsigned short)pc_atual);
+                imprimir_estado_cpu(cpu);
+                return;
+        }
+    }
 }
 
 int main(int argc, char *argv[]) {
     if (argc < 2) {
-        printf("Uso: %s programa.txt\n", argv[0]);
+        printf("Uso: %s <arquivo.hex> [breakpoint1] [breakpoint2] ...\n", argv[0]);
         return 1;
     }
 
     CPU cpu;
-    cpu_init(&cpu);
-    load_program(&cpu, argv[1]);
-    cpu_run(&cpu);
+    cpu_inicializar(&cpu);
+    carregar_programa(&cpu, argv[1]);
+
+    int num_bps = argc - 2;
+    int *breakpoints = NULL;
+
+    if (num_bps > 0) {
+        breakpoints = (int*) malloc(num_bps * sizeof(int));
+        if (!breakpoints) {
+            printf("Erro de alocacao de memoria\n");
+            return 1;
+        }
+        for (int i = 0; i < num_bps; i++) {
+            breakpoints[i] = (int)strtol(argv[i + 2], NULL, 16);
+        }
+    }
+
+    cpu_executar(&cpu, num_bps, breakpoints);
+
+    if (breakpoints) free(breakpoints);
     return 0;
 }
